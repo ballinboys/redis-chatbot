@@ -121,8 +121,10 @@ def simple_route(user_text: str) -> Dict[str, Any]:
     text_lower = user_text.lower()
 
     # Check intent
-    if any(word in text_lower for word in ["ada", "punya", "punya nggak", "apakah ada"]):
-        return {"action": "check", "query": extract_query(user_text), "category": "any", "response": ""}
+    if any(word in text_lower for word in ["ada", "punya", "punya nggak", "apakah"]):
+        query = extract_query(user_text)
+        category = categorize_query(query) if query else "any"
+        return {"action": "check", "query": query, "category": category, "response": ""}
 
     # Download intent
     if any(word in text_lower for word in ["download", "ambil", "kirim", "minta"]):
@@ -142,14 +144,19 @@ def simple_route(user_text: str) -> Dict[str, Any]:
 
 def extract_query(text: str) -> str:
     """Extract file search query from user message"""
+    import re
     # Remove common action words
     text = text.lower()
     remove_words = ["download", "ambil", "kirim", "minta", "baca", "lihat", "tampilkan", "preview", "isi",
                    "summary", "summarize", "ringkasan", "rangkum", "ada", "punya", "punya nggak", "apakah ada",
-                   "file", "yang", "dong", "ya", "deh", "nih"]
+                   "apakah", "file", "yang", "dong", "ya", "deh", "nih", "nggak", "gak"]
 
     for word in remove_words:
         text = text.replace(word, "")
+
+    # Remove extra whitespace and punctuation
+    text = re.sub(r'\s+', ' ', text)  # Multiple spaces to single space
+    text = re.sub(r'[^\w\s-]', '', text)  # Remove punctuation except hyphens
 
     return text.strip()
 
@@ -332,6 +339,10 @@ async def chat(req: ChatPayload, request: Request):
     elif q == "":
         q = route["category"] if route["category"] != "any" else ""
 
+    # Special case for check action with no query - search by category
+    if route["action"] == "check" and not q:
+        q = route["category"] if route["category"] != "any" else ""
+
     # Search files
     try:
         results = drive_search(q, topn=5) if q else []
@@ -353,8 +364,10 @@ async def chat(req: ChatPayload, request: Request):
                 "count": len(results)
             }
         else:
+            # Better message when no files found
+            query_display = route["query"] or route["category"]
             return {
-                "answer": f"Maaf, tidak ada file untuk '{route['query']}'. Pastikan file sudah dishare ke service account: {SA_EMAIL}",
+                "answer": f"Maaf, tidak ada file untuk '{query_display}'. Pastikan file sudah dishare ke service account: {SA_EMAIL}",
                 "route": route,
                 "results": [],
                 "count": 0
