@@ -145,11 +145,17 @@ def simple_route(user_text: str) -> Dict[str, Any]:
 def extract_query(text: str) -> str:
     """Extract file search query from user message"""
     import re
-    # Remove common action words
+    # Remove common action words and Indonesian filler words
     text = text.lower()
-    remove_words = ["download", "ambil", "kirim", "minta", "baca", "lihat", "tampilkan", "preview", "isi",
-                   "summary", "summarize", "ringkasan", "rangkum", "ada", "punya", "punya nggak", "apakah ada",
-                   "apakah", "file", "yang", "dong", "ya", "deh", "nih", "nggak", "gak"]
+    remove_words = [
+        # Action words
+        "download", "ambil", "kirim", "minta", "baca", "lihat", "tampilkan", "preview", "isi",
+        "summary", "summarize", "ringkasan", "rangkum", "ada", "punya", "punya nggak", "apakah ada",
+        "apakah", "file", "nggak", "gak",
+        # Indonesian filler words
+        "yang", "dong", "ya", "deh", "nih", "kan", "toh", "kok", "sih", "lah",
+        "cuma", "saja", "aja", "dengan", "buat", "buat apa", "nya"
+    ]
 
     for word in remove_words:
         text = text.replace(word, "")
