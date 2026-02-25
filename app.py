@@ -139,16 +139,18 @@ Aturan ACTION (deteksi berdasarkan intent, bukan kata persis):
 - Download: download, ambil, kirim, minta, request, can i get, give me
 - Read/Preview: baca, lihat, tampilkan, preview, isi, show, open, check (file content)
 - Summarize: summary, summarize, ringkas, rangkum, singkat,简述, tinjau
-- Check existence: ada, punya, ada nggak, apakah ada, berapa, do you have, is there, exist
+- Check/Search: ada, punya, ada nggak, apakah ada, berapa, cari, carikan, carikan saya, search, find, do you have, is there, exist
 - Chat: selain yang di atas, beri response membantu
 
 QUERY EXTRACTION (PENTING):
 - Extract hanya kata kunci bernilai untuk pencarian file
-- Hilangkan filler: yang, ya, kan, dong, deh, nih, toh, kok, sih, lah, cuma, aja, nya, dengan, buat, atau, dan, berapa
+- Hilangkan filler: yang, ya, kan, dong, deh, nih, toh, kok, sih, lah, cuma, aja, nya, dengan, buat, atau, dan, berapa, saya
 - Contoh:
   * "ambil cv dong" => query: "cv"
   * "apakah ada cv?" => query: "cv"
   * "berapa cv consultant?" => query: "cv consultant"
+  * "cari cv gregorius" => query: "cv gregorius"
+  * "carikan saya proposal" => query: "proposal"
   * "download proposal yang kemarin" => query: "proposal kemarin"
   * "baca isi cv gregorius" => query: "cv gregorius"
 
@@ -160,6 +162,7 @@ Category berdasarkan konteks:
 Untuk action="chat", beri response yang membantu jelaskan fitur yang tersedia:
 "Maaf, saya belum bisa menjawab pertanyaan tersebut. Saat ini saya bisa membantu:
 📁 Cek file - 'apakah ada cv/proposal?'
+🔍 Cari file - 'cari cv gregorius'
 📖 Baca isi - 'baca cv gregorius'
 📝 Summary - 'ringkas proposal'
 ⬇️ Download - 'download cv'"
@@ -225,8 +228,8 @@ def simple_route(user_text: str) -> Dict[str, Any]:
     """Simple pattern-based routing as fallback"""
     text_lower = user_text.lower()
 
-    # Check intent
-    if any(word in text_lower for word in ["ada", "punya", "punya nggak", "apakah"]):
+    # Check/Search intent (include "cari", "carikan")
+    if any(word in text_lower for word in ["ada", "punya", "punya nggak", "apakah", "cari", "carikan", "carikan saya"]):
         query = extract_query(user_text)
         category = categorize_query(query) if query else "any"
         return {"action": "check", "query": query, "category": category, "response": ""}
@@ -255,13 +258,14 @@ def extract_query(text: str) -> str:
     action_words = {
         "download", "ambil", "kirim", "minta", "baca", "lihat", "tampilkan",
         "preview", "isi", "summary", "summarize", "ringkasan", "rangkum",
-        "ringkas", "singkat", "ada", "punya", "apakah", "file", "dokumen"
+        "ringkas", "singkat", "ada", "punya", "apakah", "file", "dokumen",
+        "cari", "carikan", "search", "find"
     }
 
     # Indonesian filler particles (short, non-meaningful words)
     filler_particles = {
         "yang", "ya", "kan", "dong", "deh", "nih", "toh", "kok", "sih",
-        "lah", "cuma", "aja", "nya", "dengan", "buat", "atau", "dan", "berapa"
+        "lah", "cuma", "aja", "nya", "dengan", "buat", "atau", "dan", "berapa", "saya"
     }
 
     text_lower = text.lower()
