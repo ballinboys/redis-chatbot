@@ -54,23 +54,30 @@ Aturan ACTION (deteksi berdasarkan intent, bukan kata persis):
 - Download: download, ambil, kirim, minta, request, can i get, give me
 - Read/Preview: baca, lihat, tampilkan, preview, isi, show, open, check (file content)
 - Summarize: summary, summarize, ringkas, rangkum, singkat,简述, tinjau
-- Check existence: ada, punya, ada nggak, apakah ada, do you have, is there, exist
-- Chat: selain yang di atas, beri response ramah profesional
+- Check existence: ada, punya, ada nggak, apakah ada, berapa, do you have, is there, exist
+- Chat: selain yang di atas, beri response membantu
 
 QUERY EXTRACTION (PENTING):
 - Extract hanya kata kunci bernilai untuk pencarian file
-- Hilangkan semua filler & partikel tidak penting
+- Hilangkan filler: yang, ya, kan, dong, deh, nih, toh, kok, sih, lah, cuma, aja, nya, dengan, buat, atau, dan, berapa
 - Contoh:
   * "ambil cv dong" => query: "cv"
   * "apakah ada cv?" => query: "cv"
+  * "berapa cv consultant?" => query: "cv consultant"
   * "download proposal yang kemarin" => query: "proposal kemarin"
   * "baca isi cv gregorius" => query: "cv gregorius"
-  * "ringkas proposalnya" => query: "proposal"
 
 Category berdasarkan konteks:
 - mengandung "proposal" => proposal
 - mengandung "cv", "resume", "curriculum vitae" => cv
 - lainnya => other
+
+Untuk action="chat", beri response yang membantu jelaskan fitur yang tersedia:
+"Maaf, saya belum bisa menjawab pertanyaan tersebut. Saat ini saya bisa membantu:
+📁 Cek file - 'apakah ada cv/proposal?'
+📖 Baca isi - 'baca cv gregorius'
+📝 Summary - 'ringkas proposal'
+⬇️ Download - 'download cv'"
 
 Kembalikan JSON saja.
 """
@@ -169,7 +176,7 @@ def extract_query(text: str) -> str:
     # Indonesian filler particles (short, non-meaningful words)
     filler_particles = {
         "yang", "ya", "kan", "dong", "deh", "nih", "toh", "kok", "sih",
-        "lah", "cuma", "aja", "nya", "dengan", "buat", "atau", "dan"
+        "lah", "cuma", "aja", "nya", "dengan", "buat", "atau", "dan", "berapa"
     }
 
     text_lower = text.lower()
@@ -357,7 +364,14 @@ async def chat(req: ChatPayload, request: Request):
 
     # Handle simple chat (not document related)
     if route["action"] == "chat":
-        response = route.get("response") or "Maaf, fitur ini belum tersedia. Saya cuma bisa bantu urusan dokumen: cek file, baca, summarize, dan download."
+        response = route.get("response") or """Maaf, saya belum bisa menjawab pertanyaan tersebut. Saat ini saya bisa membantu Anda dengan:
+
+📁 **Cek file** - "apakah ada cv/proposal?"
+📖 **Baca isi** - "baca cv gregorius"
+📝 **Summary** - "ringkas proposal"
+⬇️ **Download** - "download cv consultant"
+
+Silakan coba dengan format pertanyaan di atas!"""
         return {
             "answer": response,
             "route": route
@@ -415,7 +429,8 @@ async def chat(req: ChatPayload, request: Request):
         }
 
     # Check for multiple files with same or similar names
-    if len(results) > 1:
+    # Only ask for clarification for "check" action - others just pick first
+    if len(results) > 1 and route["action"] == "check":
         # Check if first 2 files have same name (case-insensitive)
         first_name_lower = results[0]["name"].lower()
         same_name_count = sum(1 for f in results if f["name"].lower() == first_name_lower)
@@ -431,6 +446,7 @@ async def chat(req: ChatPayload, request: Request):
                 "options": [{"id": f["id"], "name": f["name"], "modified": f.get("modifiedTime")} for f in results[:5]]
             }
 
+    # For download/read/summarize - just pick the first result
     picked = results[0]
     file_id = picked["id"]
 
