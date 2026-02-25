@@ -45,7 +45,7 @@ Analisis intent user dan kembalikan JSON ketat (tanpa markdown, tanpa teks lain)
 Skema JSON:
 {
   "action": "download" | "read" | "summarize" | "check" | "chat",
-  "query": "kata kunci pencarian file (jika relevan)",
+  "query": "kata kunci pencarian file yang bersih (hanya kata kunci penting, tanpa filler)",
   "category": "proposal" | "cv" | "other" | "any",
   "response": "jawaban chat sederhana (untuk action=chat)"
 }
@@ -54,10 +54,22 @@ Aturan:
 - "download", "ambil", "kirim", "mintalah file" => action="download"
 - "baca", "lihat", "tampilkan", "preview", "isi" => action="read"
 - "summary", "summarize", "ringkasan", "rangkum" => action="summarize"
-- "ada", "punya", "punya nggak", "apakah ada" => action="check"
-- untuk perintah tidak terkait dokumen => action="chat", beri response ramah
-- query: kata kunci untuk pencarian file
-- category: "proposal", "cv", atau "other" berdasarkan kata kunci
+- "ada", "punya", "apakah", "ada nggak" => action="check"
+- untuk perintah tidak terkait dokumen => action="chat", beri response ramah profesional
+
+QUERY EXTRACTION (PENTING):
+- Extract hanya kata kunci bernilai untuk pencarian file
+- Hilangkan semua filler words (yang, ya, kan, dong, lah, sih, kok, toh, cuma, saja, aja, deh, nih, nya)
+- Contoh:
+  * "ambil cv dong" => query: "cv"
+  * "apakah ada cv?" => query: "cv"
+  * "download proposal yang kemarin" => query: "proposal kemarin"
+  * "baca isi cv gregorius" => query: "cv gregorius"
+
+Category berdasarkan konteks:
+- mengandung "proposal" => proposal
+- mengandung "cv", "resume", "curriculum" => cv
+- lainnya => other
 
 Kembalikan JSON saja.
 """
@@ -143,28 +155,42 @@ def simple_route(user_text: str) -> Dict[str, Any]:
 
 
 def extract_query(text: str) -> str:
-    """Extract file search query from user message"""
+    """Extract meaningful keywords from user message for file search"""
     import re
-    # Remove common action words and Indonesian filler words
-    text = text.lower()
-    remove_words = [
-        # Action words
-        "download", "ambil", "kirim", "minta", "baca", "lihat", "tampilkan", "preview", "isi",
-        "summary", "summarize", "ringkasan", "rangkum", "ada", "punya", "punya nggak", "apakah ada",
-        "apakah", "file", "nggak", "gak",
-        # Indonesian filler words
-        "yang", "dong", "ya", "deh", "nih", "kan", "toh", "kok", "sih", "lah",
-        "cuma", "saja", "aja", "dengan", "buat", "buat apa", "nya"
-    ]
 
-    for word in remove_words:
-        text = text.replace(word, "")
+    # Common action words to remove
+    action_words = {
+        "download", "ambil", "kirim", "minta", "baca", "lihat", "tampilkan",
+        "preview", "isi", "summary", "summarize", "ringkasan", "rangkum",
+        "ada", "punya", "apakah", "file", "dokumen"
+    }
 
-    # Remove extra whitespace and punctuation
-    text = re.sub(r'\s+', ' ', text)  # Multiple spaces to single space
-    text = re.sub(r'[^\w\s-]', '', text)  # Remove punctuation except hyphens
+    # Indonesian filler particles (short, non-meaningful words)
+    filler_particles = {
+        "yang", "ya", "kan", "dong", "deh", "nih", "toh", "kok", "sih",
+        "lah", "cuma", "aja", "nya", "dengan", "buat", "atau", "dan"
+    }
 
-    return text.strip()
+    text_lower = text.lower()
+    words = text_lower.split()
+
+    # Filter words: keep only meaningful keywords
+    keywords = []
+    for word in words:
+        # Remove punctuation from word
+        clean_word = re.sub(r'[^\w-]', '', word)
+
+        # Skip if empty, action word, or single-letter filler
+        if not clean_word or len(clean_word) <= 1:
+            continue
+        if clean_word in action_words or clean_word in filler_particles:
+            continue
+        if clean_word in {"nggak", "gak", "enggak", "tidak"}:
+            continue
+
+        keywords.append(clean_word)
+
+    return " ".join(keywords)
 
 
 def categorize_query(text: str) -> str:
