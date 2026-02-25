@@ -12,7 +12,8 @@ env/
 
 # Environment Variables
 .env
-.env.*
+.env.local
+.env.*.local
 
 # Service Account (SANGAT PENTING)
 service_account.json
@@ -41,3 +42,4 @@ build/
 *.pem
 *.key
 *.crt
+.vercel
