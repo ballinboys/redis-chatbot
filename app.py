@@ -50,25 +50,26 @@ Skema JSON:
   "response": "jawaban chat sederhana (untuk action=chat)"
 }
 
-Aturan:
-- "download", "ambil", "kirim", "mintalah file" => action="download"
-- "baca", "lihat", "tampilkan", "preview", "isi" => action="read"
-- "summary", "summarize", "ringkasan", "rangkum" => action="summarize"
-- "ada", "punya", "apakah", "ada nggak" => action="check"
-- untuk perintah tidak terkait dokumen => action="chat", beri response ramah profesional
+Aturan ACTION (deteksi berdasarkan intent, bukan kata persis):
+- Download: download, ambil, kirim, minta, request, can i get, give me
+- Read/Preview: baca, lihat, tampilkan, preview, isi, show, open, check (file content)
+- Summarize: summary, summarize, ringkas, rangkum, singkat,简述, tinjau
+- Check existence: ada, punya, ada nggak, apakah ada, do you have, is there, exist
+- Chat: selain yang di atas, beri response ramah profesional
 
 QUERY EXTRACTION (PENTING):
 - Extract hanya kata kunci bernilai untuk pencarian file
-- Hilangkan semua filler words (yang, ya, kan, dong, lah, sih, kok, toh, cuma, saja, aja, deh, nih, nya)
+- Hilangkan semua filler & partikel tidak penting
 - Contoh:
   * "ambil cv dong" => query: "cv"
   * "apakah ada cv?" => query: "cv"
   * "download proposal yang kemarin" => query: "proposal kemarin"
   * "baca isi cv gregorius" => query: "cv gregorius"
+  * "ringkas proposalnya" => query: "proposal"
 
 Category berdasarkan konteks:
 - mengandung "proposal" => proposal
-- mengandung "cv", "resume", "curriculum" => cv
+- mengandung "cv", "resume", "curriculum vitae" => cv
 - lainnya => other
 
 Kembalikan JSON saja.
@@ -146,8 +147,8 @@ def simple_route(user_text: str) -> Dict[str, Any]:
     if any(word in text_lower for word in ["baca", "lihat", "tampilkan", "preview", "isi"]):
         return {"action": "read", "query": extract_query(user_text), "category": categorize_query(user_text), "response": ""}
 
-    # Summarize intent
-    if any(word in text_lower for word in ["summary", "summarize", "ringkasan", "rangkum"]):
+    # Summarize intent (include "ringkas")
+    if any(word in text_lower for word in ["summary", "summarize", "ringkasan", "rangkum", "ringkas", "singkat"]):
         return {"action": "summarize", "query": extract_query(user_text), "category": categorize_query(user_text), "response": ""}
 
     # Default chat
@@ -162,7 +163,7 @@ def extract_query(text: str) -> str:
     action_words = {
         "download", "ambil", "kirim", "minta", "baca", "lihat", "tampilkan",
         "preview", "isi", "summary", "summarize", "ringkasan", "rangkum",
-        "ada", "punya", "apakah", "file", "dokumen"
+        "ringkas", "singkat", "ada", "punya", "apakah", "file", "dokumen"
     }
 
     # Indonesian filler particles (short, non-meaningful words)
