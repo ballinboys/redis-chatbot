@@ -2,6 +2,8 @@ import io
 import os
 import json
 import re
+import uuid
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
@@ -18,6 +20,89 @@ from pypdf import PdfReader
 
 load_dotenv()
 app = FastAPI()
+
+# ===== SESSION MEMORY (upgradeable to Redis) =====
+class SessionStore:
+    """Simple in-memory session storage (upgradeable to Redis)"""
+
+    def __init__(self):
+        self.sessions: Dict[str, Dict] = {}
+        self.session_timeout = 3600  # 1 hour
+
+    def create_session(self) -> str:
+        """Create new session and return session_id"""
+        session_id = str(uuid.uuid4())
+        self.sessions[session_id] = {
+            "created_at": datetime.now(),
+            "messages": [],  # Chat history
+            "context": {},   # Additional context (e.g., pending file selection)
+            "last_activity": datetime.now()
+        }
+        return session_id
+
+    def get_session(self, session_id: str) -> Optional[Dict]:
+        """Get session data if exists and not expired"""
+        session = self.sessions.get(session_id)
+        if not session:
+            return None
+
+        # Check timeout
+        if datetime.now() - session["last_activity"] > timedelta(seconds=self.session_timeout):
+            del self.sessions[session_id]
+            return None
+
+        return session
+
+    def update_session(self, session_id: str, **kwargs):
+        """Update session data"""
+        session = self.get_session(session_id)
+        if session:
+            session.update(kwargs)
+            session["last_activity"] = datetime.now()
+
+    def add_message(self, session_id: str, role: str, content: str, route: Dict = None):
+        """Add message to chat history"""
+        session = self.get_session(session_id)
+        if session:
+            session["messages"].append({
+                "role": role,
+                "content": content,
+                "route": route,
+                "timestamp": datetime.now().isoformat()
+            })
+
+    def get_history(self, session_id: str, limit: int = 10) -> List[Dict]:
+        """Get recent chat history"""
+        session = self.get_session(session_id)
+        if session:
+            return session["messages"][-limit:]
+        return []
+
+    def set_context(self, session_id: str, key: str, value: Any):
+        """Store context data (e.g., pending file options)"""
+        session = self.get_session(session_id)
+        if session:
+            session["context"][key] = value
+
+    def get_context(self, session_id: str, key: str) -> Any:
+        """Get context data"""
+        session = self.get_session(session_id)
+        if session:
+            return session["context"].get(key)
+        return None
+
+    def clear_context(self, session_id: str, key: str = None):
+        """Clear specific or all context"""
+        session = self.get_session(session_id)
+        if session:
+            if key:
+                session["context"].pop(key, None)
+            else:
+                session["context"] = {}
+
+
+# Global session store
+session_store = SessionStore()
 
 # ===== ENV =====
 # Claude API Key
@@ -211,6 +296,42 @@ def categorize_query(text: str) -> str:
     return "other"
 
 
+def detect_number_selection(user_text: str, max_number: int) -> Optional[int]:
+    """Detect if user is selecting a number from a list
+
+    Returns:
+        int: The selected number (1-indexed), or None if not a selection
+    """
+    text_lower = user_text.lower()
+    words = text_lower.split()
+
+    # Check for number words (first, second, third, etc.)
+    number_words = {
+        "pertama": 1, "satu": 1, "one": 1, "1": 1,
+        "kedua": 2, "dua": 2, "two": 2, "2": 2,
+        "ketiga": 3, "tiga": 3, "three": 3, "3": 3,
+        "keempat": 4, "empat": 4, "four": 4, "4": 4,
+        "kelima": 5, "lima": 5, "five": 5, "5": 5,
+        "keenam": 6, "enam": 6, "six": 6, "6": 6,
+    }
+
+    # Check if user said a number word
+    for word in words:
+        clean = re.sub(r'[^\w]', '', word)
+        if clean in number_words:
+            num = number_words[clean]
+            return num if num <= max_number else None
+
+    # Check for standalone numbers
+    for word in words:
+        if word.isdigit():
+            num = int(word)
+            if 1 <= num <= max_number:
+                return num
+
+    return None
+
+
 # ===== Drive client (Service Account) =====
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 
@@ -339,32 +460,107 @@ def http_download(file_id: str):
 
 class ChatPayload(BaseModel):
     message: str
+    session_id: Optional[str] = None  # Optional session ID for conversation memory
 
 @app.post("/chat")
 async def chat(req: ChatPayload, request: Request):
+    # ===== SESSION HANDLING =====
+    session_id = req.session_id
+    session = None
+
+    if session_id:
+        session = session_store.get_session(session_id)
+
+    # Create new session if doesn't exist
+    if not session:
+        session_id = session_store.create_session()
+        session = session_store.get_session(session_id)
+
     user_text = (req.message or "").strip()
+
+    # Check if user is responding to a file selection prompt
+    pending_files = session_store.get_context(session_id, "pending_file_selection")
+    pending_action = session_store.get_context(session_id, "pending_action")
+
+    if pending_files and pending_action:
+        # User is selecting from previous file list
+        selection = detect_number_selection(user_text, len(pending_files))
+
+        if selection:
+            # User selected a file number
+            selected_file = pending_files[selection - 1]
+            file_id = selected_file["id"]
+
+            # Clear the pending context
+            session_store.clear_context(session_id)
+
+            # Execute the pending action
+            if pending_action == "download":
+                url = build_download_url(request, file_id)
+                response = {
+                    "answer": f"Oke, ini link download untuk '{selected_file['name']}': {url}",
+                    "download_url": url,
+                    "file": selected_file,
+                    "route": {"action": "download", "query": "", "category": "any"}
+                }
+            elif pending_action == "read":
+                prev = preview_text(file_id, pages=5, max_chars=8000)
+                response = {
+                    "answer": prev.get("warning") or f"Berikut isi dari '{selected_file['name']}' (potongan):",
+                    "preview": prev,
+                    "file": selected_file,
+                    "route": {"action": "read", "query": "", "category": "any"}
+                }
+            elif pending_action == "summarize":
+                prev = preview_text(file_id, pages=3, max_chars=4000)
+                response = {
+                    "answer": f"Summary dari '{selected_file['name']}':",
+                    "preview": prev,
+                    "file": selected_file,
+                    "route": {"action": "summarize", "query": "", "category": "any"}
+                }
+            else:
+                response = {
+                    "answer": "Maaf, ada error internal.",
+                    "route": {"action": "error", "query": "", "category": "any"}
+                }
+
+            # Add to history
+            session_store.add_message(session_id, "user", user_text)
+            session_store.add_message(session_id, "assistant", response["answer"], response.get("route"))
+            response["session_id"] = session_id
+            return response
+
+    # Normal message flow
     if not user_text:
-        return {
+        response = {
             "answer": "Halo! Saya chatbot dokumen. Ada yang bisa dibantu?",
-            "route": {"action": "chat", "query": "", "category": "any"}
+            "route": {"action": "chat", "query": "", "category": "any"},
+            "session_id": session_id
         }
+        session_store.add_message(session_id, "assistant", response["answer"], response["route"])
+        return response
 
     # Simple greeting check (no API call)
     text_lower = user_text.lower()
     simple_greetings = ["hai", "halo", "hello", "hi", "hey", "selamat pagi", "selamat siang", "selamat sore", "selamat malam"]
 
     if any(greeting in text_lower for greeting in simple_greetings):
-        return {
+        response = {
             "answer": "Halo! Saya chatbot dokumen Anda. Saya bisa bantu cek file, baca isi, summarize, atau download file dari Google Drive. Ada yang bisa dibantu?",
-            "route": {"action": "greeting", "query": "", "category": "any"}
+            "route": {"action": "greeting", "query": "", "category": "any"},
+            "session_id": session_id
         }
+        session_store.add_message(session_id, "user", user_text)
+        session_store.add_message(session_id, "assistant", response["answer"], response["route"])
+        return response
 
     # Route using Claude (or simple fallback)
     route = await claude_route(user_text)
 
     # Handle simple chat (not document related)
     if route["action"] == "chat":
-        response = route.get("response") or """Maaf, saya belum bisa menjawab pertanyaan tersebut. Saat ini saya bisa membantu Anda dengan:
+        response_text = route.get("response") or """Maaf, saya belum bisa menjawab pertanyaan tersebut. Saat ini saya bisa membantu Anda dengan:
 
 📁 **Cek file** - "apakah ada cv/proposal?"
 📖 **Baca isi** - "baca cv gregorius"
@@ -372,10 +568,14 @@ async def chat(req: ChatPayload, request: Request):
 ⬇️ **Download** - "download cv consultant"
 
 Silakan coba dengan format pertanyaan di atas!"""
-        return {
-            "answer": response,
-            "route": route
+        response = {
+            "answer": response_text,
+            "route": route,
+            "session_id": session_id
         }
+        session_store.add_message(session_id, "user", user_text)
+        session_store.add_message(session_id, "assistant", response["answer"], route)
+        return response
 
     # Build search query
     q = route["query"]
@@ -394,56 +594,84 @@ Silakan coba dengan format pertanyaan di atas!"""
     try:
         results = drive_search(q, topn=5) if q else []
     except Exception as e:
-        return {
+        response = {
             "answer": f"Maaf, ada error saat mencari file: {str(e)}",
             "route": route,
-            "results": []
+            "results": [],
+            "session_id": session_id
         }
+        session_store.add_message(session_id, "user", user_text)
+        session_store.add_message(session_id, "assistant", response["answer"], route)
+        return response
 
     # Handle "check" action - just verify files exist
     if route["action"] == "check":
+        session_store.add_message(session_id, "user", user_text)
         if results:
             file_names = [f["name"] for f in results[:5]]
-            return {
-                "answer": f"Ya, ada {len(results)} file yang ditemukan: {', '.join(file_names)}",
+            answer = f"Ya, ada {len(results)} file yang ditemukan: {', '.join(file_names)}"
+            response = {
+                "answer": answer,
                 "route": route,
                 "results": results,
-                "count": len(results)
+                "count": len(results),
+                "session_id": session_id
             }
+            session_store.add_message(session_id, "assistant", answer, route)
+            return response
         else:
             # Better message when no files found
             query_display = route["query"] or route["category"]
-            return {
-                "answer": f"Maaf, tidak ada file untuk '{query_display}'. Pastikan file sudah dishare ke service account: {SA_EMAIL}",
+            answer = f"Maaf, tidak ada file untuk '{query_display}'. Pastikan file sudah dishare ke service account: {SA_EMAIL}"
+            response = {
+                "answer": answer,
                 "route": route,
                 "results": [],
-                "count": 0
+                "count": 0,
+                "session_id": session_id
             }
+            session_store.add_message(session_id, "assistant", answer, route)
+            return response
 
     # No files found for other actions
     if not results:
-        return {
-            "answer": f"Tidak ketemu file untuk '{route['query']}'. Pastikan file sudah dishare ke service account: {SA_EMAIL}",
+        answer = f"Tidak ketemu file untuk '{route['query']}'. Pastikan file sudah dishare ke service account: {SA_EMAIL}"
+        response = {
+            "answer": answer,
             "route": route,
-            "results": []
+            "results": [],
+            "session_id": session_id
         }
+        session_store.add_message(session_id, "user", user_text)
+        session_store.add_message(session_id, "assistant", answer, route)
+        return response
 
-    # Check for multiple files with same or similar names
-    # Only ask for clarification for "check" action - others just pick first
-    if len(results) > 1 and route["action"] == "check":
+    # Check for multiple files - ask user to select for download/read/summarize
+    if len(results) > 1:
         # Check if first 2 files have same name (case-insensitive)
         first_name_lower = results[0]["name"].lower()
         same_name_count = sum(1 for f in results if f["name"].lower() == first_name_lower)
 
         if same_name_count >= 2:
-            # Multiple files with exact same name - ask user to specify
-            file_list = "\n".join([f"{i+1}. {f['name']} (Modified: {f.get('modifiedTime', 'N/A')})" for i, f in enumerate(results[:5])])
+            # Multiple files with exact same name - store context and ask user to select
+            file_list = "\n".join([f"{i+1}. {f['name']}" for i, f in enumerate(results[:5])])
+
+            # Store pending selection in session
+            session_store.set_context(session_id, "pending_file_selection", results[:5])
+            session_store.set_context(session_id, "pending_action", route["action"])
+
+            answer = f"Ditemukan {len(results)} file. Mau yang mana?\n{file_list}\n\nBalas dengan nomor (1-{len(results)}) atau 'yang pertama/kedua/...'"
+
+            session_store.add_message(session_id, "user", user_text)
+            session_store.add_message(session_id, "assistant", answer, route)
+
             return {
-                "answer": f"Ditemukan {len(results)} file dengan nama mirip. Mau yang mana?\n{file_list}\n\nSilakan spesifikasikan lebih detail (misal: tambahkan tanggal atau detail lain).",
+                "answer": answer,
                 "route": route,
                 "results": results,
                 "need_clarification": True,
-                "options": [{"id": f["id"], "name": f["name"], "modified": f.get("modifiedTime")} for f in results[:5]]
+                "options": [{"id": f["id"], "name": f["name"], "modified": f.get("modifiedTime")} for f in results[:5]],
+                "session_id": session_id
             }
 
     # For download/read/summarize - just pick the first result
@@ -453,35 +681,51 @@ Silakan coba dengan format pertanyaan di atas!"""
     # Download action
     if route["action"] == "download":
         url = build_download_url(request, file_id)
+        answer = f"Ini link download untuk file '{picked['name']}': {url}"
+        session_store.add_message(session_id, "user", user_text)
+        session_store.add_message(session_id, "assistant", answer, route)
         return {
-            "answer": f"Ini link download untuk file '{picked['name']}': {url}",
+            "answer": answer,
             "download_url": url,
             "file": picked,
-            "route": route
+            "route": route,
+            "session_id": session_id
         }
 
     # Read action - show more content
     if route["action"] == "read":
         prev = preview_text(file_id, pages=5, max_chars=8000)
+        answer = prev.get("warning") or f"Berikut isi dari '{picked['name']}' (potongan):"
+        session_store.add_message(session_id, "user", user_text)
+        session_store.add_message(session_id, "assistant", answer, route)
         return {
-            "answer": prev.get("warning") or f"Berikut isi dari '{picked['name']}' (potongan):",
+            "answer": answer,
             "preview": prev,
             "file": picked,
-            "route": route
+            "route": route,
+            "session_id": session_id
         }
 
     # Summarize action - show preview with summary label
     if route["action"] == "summarize":
         prev = preview_text(file_id, pages=3, max_chars=4000)
+        answer = f"Summary dari '{picked['name']}':"
+        session_store.add_message(session_id, "user", user_text)
+        session_store.add_message(session_id, "assistant", answer, route)
         return {
-            "answer": f"Summary dari '{picked['name']}':",
+            "answer": answer,
             "preview": prev,
             "file": picked,
-            "route": route
+            "route": route,
+            "session_id": session_id
         }
 
     # Fallback
+    answer = "Maaf, fitur ini belum tersedia."
+    session_store.add_message(session_id, "user", user_text)
+    session_store.add_message(session_id, "assistant", answer, route)
     return {
-        "answer": "Maaf, fitur ini belum tersedia.",
-        "route": route
+        "answer": answer,
+        "route": route,
+        "session_id": session_id
     }
