@@ -673,7 +673,18 @@ def resolve_base_url(request: Request) -> str:
     # Use env if provided; otherwise infer from incoming request (works in deploy)
     if BASE_URL_ENV:
         return BASE_URL_ENV.strip().rstrip("/")
-    return str(request.base_url).rstrip("/")
+
+    # For Vercel/serverless, build from headers
+    # Try to get the actual host from the request
+    scheme = request.url.scheme
+    host = request.headers.get("host", request.headers.get("x-forwarded-host", request.url.hostname))
+
+    # Build the base URL
+    if host:
+        return f"{scheme}://{host}"
+    else:
+        # Fallback to request.base_url
+        return str(request.base_url).rstrip("/")
 
 def build_download_url(request: Request, file_id: str) -> str:
     base = resolve_base_url(request)
