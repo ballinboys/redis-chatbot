@@ -1,7 +1,8 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 export default function ChatMessage({ message }) {
   const messageRef = useRef(null);
+  const [isExpanded, setIsExpanded] = useState(false);
 
   const isUser = message.role === 'user';
 
@@ -10,6 +11,14 @@ export default function ChatMessage({ message }) {
       messageRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
   }, [message]);
+
+  // Truncate content if too long
+  const MAX_PREVIEW_LENGTH = 150;
+  const content = message.content || '';
+  const isLongContent = content.length > MAX_PREVIEW_LENGTH;
+  const displayContent = isLongContent && !isExpanded
+    ? content.substring(0, MAX_PREVIEW_LENGTH) + '...'
+    : content;
 
   return (
     <div ref={messageRef} className={`flex ${isUser ? 'justify-end' : 'justify-start'} mb-4`}>
@@ -30,9 +39,23 @@ export default function ChatMessage({ message }) {
             <span className="text-xs font-medium text-gray-600">Bot</span>
           </div>
         )}
+
         <div className="whitespace-pre-wrap break-words text-sm leading-relaxed">
-          {message.content}
+          {displayContent}
         </div>
+
+        {/* Expand/Collapse button for long content */}
+        {isLongContent && (
+          <button
+            onClick={() => setIsExpanded(!isExpanded)}
+            className={`mt-2 text-xs font-medium underline ${
+              isUser ? 'text-white/80 hover:text-white' : 'text-blue-600 hover:text-blue-700'
+            }`}
+          >
+            {isExpanded ? 'Tutup' : 'Lihat Selengkapnya'}
+          </button>
+        )}
+
         {message.download_url && (
           <a
             href={message.download_url}
@@ -46,12 +69,27 @@ export default function ChatMessage({ message }) {
             <span className="text-sm font-medium">Download File</span>
           </a>
         )}
+
         {message.preview && (
           <div className="mt-2 p-3 bg-black/5 rounded-lg">
             <p className="text-xs font-medium mb-1">Preview:</p>
-            <p className="text-xs whitespace-pre-wrap">{message.preview.text?.substring(0, 200)}...</p>
+            <p className="text-xs whitespace-pre-wrap">
+              {isExpanded
+                ? message.preview.text || 'Tidak ada preview'
+                : (message.preview.text?.substring(0, 100) || 'Tidak ada preview') + '...'
+              }
+            </p>
+            {message.preview.text && message.preview.text.length > 100 && !isExpanded && (
+              <button
+                onClick={() => setIsExpanded(true)}
+                className="mt-1 text-xs text-blue-600 hover:text-blue-700 underline"
+              >
+                Lihat Preview Lengkap
+              </button>
+            )}
           </div>
         )}
+
         {message.file && (
           <div className="mt-2 text-xs opacity-75">
             📎 {message.file.name}
