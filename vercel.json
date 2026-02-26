@@ -16,15 +16,18 @@
   "routes": [
     {
       "src": "/api/(.*)",
-      "dest": "app.py"
+      "dest": "/app.py"
     },
     {
       "src": "/health",
-      "dest": "app.py"
+      "dest": "/app.py"
+    },
+    {
+      "handle": "filesystem"
     },
     {
       "src": "/(.*)",
-      "dest": "frontend/dist/$1"
+      "dest": "/$1"
     }
   ],
   "env": {
