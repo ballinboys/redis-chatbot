@@ -3,14 +3,19 @@ import os
 import json
 import re
 import uuid
+import hashlib
+import bcrypt
+import jwt
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Depends, Header
 from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import httpx
+import redis
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -21,44 +26,98 @@ from pypdf import PdfReader
 load_dotenv()
 app = FastAPI()
 
-# ===== SESSION MEMORY (upgradeable to Redis) =====
-class SessionStore:
-    """Simple in-memory session storage (upgradeable to Redis)"""
+# ===== CORS =====
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ===== ENV =====
+# Redis Configuration
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+try:
+    redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+    redis_client.ping()
+    REDIS_AVAILABLE = True
+except:
+    REDIS_AVAILABLE = False
+    print("Warning: Redis not available, falling back to in-memory storage")
+
+# JWT Configuration
+JWT_SECRET = os.getenv("JWT_SECRET", "your-secret-key-change-this")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRATION_HOURS = 24
+
+# ===== REDIS SESSION STORE =====
+class RedisSessionStore:
+    """Redis-based session storage with in-memory fallback"""
 
     def __init__(self):
-        self.sessions: Dict[str, Dict] = {}
-        self.session_timeout = 3600  # 1 hour
+        self.use_redis = REDIS_AVAILABLE
+        self.in_memory: Dict[str, Dict] = {}
+        self.session_timeout = 3600 * 24  # 24 hours
 
-    def create_session(self) -> str:
+    def _redis_key(self, session_id: str) -> str:
+        return f"session:{session_id}"
+
+    def create_session(self, user_id: str = None) -> str:
         """Create new session and return session_id"""
         session_id = str(uuid.uuid4())
-        self.sessions[session_id] = {
-            "created_at": datetime.now(),
-            "messages": [],  # Chat history
-            "context": {},   # Additional context (e.g., pending file selection)
-            "last_activity": datetime.now()
+        session_data = {
+            "created_at": datetime.now().isoformat(),
+            "user_id": user_id,
+            "messages": [],
+            "context": {},
+            "last_activity": datetime.now().isoformat()
         }
+
+        if self.use_redis:
+            redis_client.setex(
+                self._redis_key(session_id),
+                self.session_timeout,
+                json.dumps(session_data)
+            )
+        else:
+            self.in_memory[session_id] = session_data
+
         return session_id
 
     def get_session(self, session_id: str) -> Optional[Dict]:
         """Get session data if exists and not expired"""
-        session = self.sessions.get(session_id)
-        if not session:
-            return None
+        if self.use_redis:
+            data = redis_client.get(self._redis_key(session_id))
+            if not data:
+                return None
+            return json.loads(data)
+        else:
+            session = self.in_memory.get(session_id)
+            if not session:
+                return None
 
-        # Check timeout
-        if datetime.now() - session["last_activity"] > timedelta(seconds=self.session_timeout):
-            del self.sessions[session_id]
-            return None
+            # Check timeout
+            last_activity = datetime.fromisoformat(session["last_activity"])
+            if datetime.now() - last_activity > timedelta(seconds=self.session_timeout):
+                del self.in_memory[session_id]
+                return None
 
-        return session
+            return session
 
     def update_session(self, session_id: str, **kwargs):
         """Update session data"""
         session = self.get_session(session_id)
         if session:
             session.update(kwargs)
-            session["last_activity"] = datetime.now()
+            session["last_activity"] = datetime.now().isoformat()
+
+            if self.use_redis:
+                redis_client.setex(
+                    self._redis_key(session_id),
+                    self.session_timeout,
+                    json.dumps(session)
+                )
 
     def add_message(self, session_id: str, role: str, content: str, route: Dict = None):
         """Add message to chat history"""
@@ -71,7 +130,14 @@ class SessionStore:
                 "timestamp": datetime.now().isoformat()
             })
 
-    def get_history(self, session_id: str, limit: int = 10) -> List[Dict]:
+            if self.use_redis:
+                redis_client.setex(
+                    self._redis_key(session_id),
+                    self.session_timeout,
+                    json.dumps(session)
+                )
+
+    def get_history(self, session_id: str, limit: int = 50) -> List[Dict]:
         """Get recent chat history"""
         session = self.get_session(session_id)
         if session:
@@ -83,6 +149,13 @@ class SessionStore:
         session = self.get_session(session_id)
         if session:
             session["context"][key] = value
+
+            if self.use_redis:
+                redis_client.setex(
+                    self._redis_key(session_id),
+                    self.session_timeout,
+                    json.dumps(session)
+                )
 
     def get_context(self, session_id: str, key: str) -> Any:
         """Get context data"""
@@ -100,9 +173,147 @@ class SessionStore:
             else:
                 session["context"] = {}
 
+            if self.use_redis:
+                redis_client.setex(
+                    self._redis_key(session_id),
+                    self.session_timeout,
+                    json.dumps(session)
+                )
+
+    def delete_session(self, session_id: str):
+        """Delete a session"""
+        if self.use_redis:
+            redis_client.delete(self._redis_key(session_id))
+        else:
+            self.in_memory.pop(session_id, None)
+
 
 # Global session store
-session_store = SessionStore()
+session_store = RedisSessionStore()
+
+
+# ===== USER MANAGEMENT =====
+class UserStore:
+    """User management with Redis backend"""
+
+    def __init__(self):
+        self.use_redis = REDIS_AVAILABLE
+        self.in_memory: Dict[str, Dict] = {}
+
+    def _redis_key(self, username: str) -> str:
+        return f"user:{username}"
+
+    def create_user(self, username: str, password: str, email: str = None) -> bool:
+        """Create a new user"""
+        if self.user_exists(username):
+            return False
+
+        # Hash password
+        password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+        user_data = {
+            "username": username,
+            "password_hash": password_hash,
+            "email": email,
+            "created_at": datetime.now().isoformat()
+        }
+
+        if self.use_redis:
+            redis_client.set(self._redis_key(username), json.dumps(user_data))
+        else:
+            self.in_memory[username] = user_data
+
+        return True
+
+    def user_exists(self, username: str) -> bool:
+        """Check if user exists"""
+        if self.use_redis:
+            return redis_client.exists(self._redis_key(username))
+        else:
+            return username in self.in_memory
+
+    def verify_user(self, username: str, password: str) -> bool:
+        """Verify user credentials"""
+        if self.use_redis:
+            data = redis_client.get(self._redis_key(username))
+            if not data:
+                return False
+            user_data = json.loads(data)
+        else:
+            user_data = self.in_memory.get(username)
+            if not user_data:
+                return False
+
+        # Verify password
+        return bcrypt.checkpw(password.encode('utf-8'), user_data["password_hash"].encode('utf-8'))
+
+    def get_user(self, username: str) -> Optional[Dict]:
+        """Get user data without password"""
+        if self.use_redis:
+            data = redis_client.get(self._redis_key(username))
+            if not data:
+                return None
+            user_data = json.loads(data)
+        else:
+            user_data = self.in_memory.get(username)
+            if not user_data:
+                return None
+
+        # Return without password
+        return {
+            "username": user_data["username"],
+            "email": user_data.get("email"),
+            "created_at": user_data["created_at"]
+        }
+
+
+# Global user store
+user_store = UserStore()
+
+
+# ===== AUTHENTICATION =====
+def create_access_token(username: str) -> str:
+    """Create JWT access token"""
+    payload = {
+        "username": username,
+        "exp": datetime.utcnow() + timedelta(hours=JWT_EXPIRATION_HOURS),
+        "iat": datetime.utcnow()
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def verify_access_token(token: str) -> Optional[str]:
+    """Verify JWT token and return username"""
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return payload.get("username")
+    except jwt.PyJWTError:
+        return None
+
+
+async def get_current_user(authorization: str = Header(None)) -> Optional[str]:
+    """Get current user from Authorization header"""
+    if not authorization:
+        return None
+
+    if not authorization.startswith("Bearer "):
+        return None
+
+    token = authorization.split(" ")[1]
+    username = verify_access_token(token)
+
+    return username
+
+
+# Pydantic models for auth
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+    email: Optional[str] = None
 
 # ===== ENV =====
 # Claude API Key
@@ -440,7 +651,7 @@ def resolve_base_url(request: Request) -> str:
 
 def build_download_url(request: Request, file_id: str) -> str:
     base = resolve_base_url(request)
-    return f"{base}/drive/download/{file_id}"
+    return f"{base}/api/drive/download/{file_id}"
 
 
 # ===== HTTP endpoints =====
@@ -451,10 +662,88 @@ def health():
         "service_account_email": SA_EMAIL,
         "folder_restriction": bool(FOLDER_ID),
         "base_url_env_set": bool(BASE_URL_ENV),
+        "redis_available": REDIS_AVAILABLE
     }
 
-@app.get("/drive/download/{file_id}")
-def http_download(file_id: str):
+
+# ===== Authentication Endpoints =====
+@app.post("/api/auth/register")
+async def register(req: RegisterRequest):
+    """Register a new user"""
+    username = req.username.strip()
+    password = req.password
+
+    if len(username) < 3:
+        raise HTTPException(400, "Username must be at least 3 characters")
+
+    if len(password) < 6:
+        raise HTTPException(400, "Password must be at least 6 characters")
+
+    if user_store.create_user(username, password, req.email):
+        return {
+            "success": True,
+            "message": "User registered successfully",
+            "username": username
+        }
+    else:
+        raise HTTPException(400, "Username already exists")
+
+
+@app.post("/api/auth/login")
+async def login(req: LoginRequest):
+    """Login and get access token"""
+    username = req.username.strip()
+    password = req.password
+
+    if user_store.verify_user(username, password):
+        access_token = create_access_token(username)
+        return {
+            "success": True,
+            "access_token": access_token,
+            "token_type": "bearer",
+            "username": username
+        }
+    else:
+        raise HTTPException(401, "Invalid username or password")
+
+
+@app.post("/api/auth/logout")
+async def logout(current_user: str = Depends(get_current_user)):
+    """Logout (client-side token removal)"""
+    return {
+        "success": True,
+        "message": "Logged out successfully"
+    }
+
+
+@app.get("/api/auth/me")
+async def get_me(current_user: str = Depends(get_current_user)):
+    """Get current user info"""
+    user_data = user_store.get_user(current_user)
+    if user_data:
+        return {
+            "success": True,
+            "user": user_data
+        }
+    else:
+        raise HTTPException(404, "User not found")
+
+
+@app.get("/api/session/history")
+async def get_chat_history(
+    session_id: str,
+    current_user: str = Depends(get_current_user)
+):
+    """Get chat history for a session"""
+    history = session_store.get_history(session_id, limit=100)
+    return {
+        "success": True,
+        "session_id": session_id,
+        "messages": history
+    }
+
+@app.get("/api/drive/download/{file_id}")
+async def http_download(file_id: str, current_user: str = Depends(get_current_user)):
     data, filename = _download_pdf_or_export(file_id)
     return StreamingResponse(
         io.BytesIO(data),
@@ -466,8 +755,8 @@ class ChatPayload(BaseModel):
     message: str
     session_id: Optional[str] = None  # Optional session ID for conversation memory
 
-@app.post("/chat")
-async def chat(req: ChatPayload, request: Request):
+@app.post("/api/chat")
+async def chat(req: ChatPayload, request: Request, current_user: str = Depends(get_current_user)):
     # ===== SESSION HANDLING =====
     session_id = req.session_id
     session = None

@@ -6,3 +6,6 @@ google-auth
 pypdf
 pydantic
 httpx
+redis
+bcrypt
+pyjwt
