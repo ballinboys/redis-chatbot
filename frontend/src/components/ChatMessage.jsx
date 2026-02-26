@@ -73,23 +73,29 @@ export default function ChatMessage({ message }) {
           </a>
         )}
 
-        {message.preview && (
-          <div className="mt-2 p-3 bg-black/5 rounded-lg">
-            <p className="text-xs font-medium mb-1">Preview:</p>
-            <p className="text-xs whitespace-pre-wrap">
+        {message.preview && message.preview.text && (
+          <div className="mt-3 p-4 bg-white/50 rounded-lg border border-gray-200">
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-xs font-bold text-gray-700">📄 Preview Dokumen:</p>
+              {message.preview.text.length > 200 && (
+                <button
+                  onClick={() => setIsExpanded(!isExpanded)}
+                  className="text-xs text-blue-600 hover:text-blue-700 font-medium"
+                >
+                  {isExpanded ? '▲ Tutup' : '▼ Lihat Semua'}
+                </button>
+              )}
+            </div>
+            <div
+              className="text-xs whitespace-pre-wrap leading-relaxed text-gray-800 max-h-96 overflow-y-auto"
+              style={{ fontFamily: 'monospace' }}
+            >
               {isExpanded
-                ? message.preview.text || 'Tidak ada preview'
-                : (message.preview.text?.substring(0, 100) || 'Tidak ada preview') + '...'
+                ? message.preview.text
+                : message.preview.text.substring(0, 300) +
+                  (message.preview.text.length > 300 ? '\n\n... (klik "Lihat Semua" untuk menampilkan lengkap)' : '')
               }
-            </p>
-            {message.preview.text && message.preview.text.length > 100 && !isExpanded && (
-              <button
-                onClick={() => setIsExpanded(true)}
-                className="mt-1 text-xs text-blue-600 hover:text-blue-700 underline"
-              >
-                Lihat Preview Lengkap
-              </button>
-            )}
+            </div>
           </div>
         )}
 

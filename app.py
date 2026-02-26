@@ -639,8 +639,20 @@ def preview_text(file_id: str, pages: int = 3, max_chars: int = 4000) -> Dict[st
     for p in reader.pages[:max(1, pages)]:
         parts.append(p.extract_text() or "")
     text = "\n".join(parts).strip()
+
     if not text:
         return {"warning": "Teks tidak terbaca (kemungkinan PDF scan). Perlu OCR untuk preview.", "text": ""}
+
+    # Clean up text: remove excessive spaces and fix formatting
+    # Replace multiple spaces with single space
+    text = re.sub(r' +', ' ', text)
+    # Replace multiple newlines with double newline (paragraph separator)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    # Remove spaces around newlines
+    text = re.sub(r' ?\n ?', '\n', text)
+    # Fix broken words from PDF column layout (optional)
+    # text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
+
     return {"text": text[:max_chars]}
 
 def resolve_base_url(request: Request) -> str:
