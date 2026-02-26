@@ -16,7 +16,12 @@ export default function ChatContainer({ username, onLogout }) {
       if (sessionId) {
         try {
           const response = await chatAPI.getHistory(sessionId);
-          setMessages(response.data.messages || []);
+          // Ensure all message content is properly formatted as strings
+          const history = (response.data.messages || []).map(msg => ({
+            ...msg,
+            content: String(msg.content || '')
+          }));
+          setMessages(history);
         } catch (err) {
           console.error('Failed to load history:', err);
         }
@@ -41,10 +46,10 @@ export default function ChatContainer({ username, onLogout }) {
         localStorage.setItem('session_id', data.session_id);
       }
 
-      // Add bot response
+      // Add bot response - ensure proper string formatting
       const botMsg = {
         role: 'assistant',
-        content: data.answer,
+        content: String(data.answer || ''),  // Ensure it's a string
         download_url: data.download_url,
         preview: data.preview,
         file: data.file,

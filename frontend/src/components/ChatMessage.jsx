@@ -40,7 +40,10 @@ export default function ChatMessage({ message }) {
           </div>
         )}
 
-        <div className="whitespace-pre-wrap break-words text-sm leading-relaxed">
+        <div
+          className="text-sm leading-relaxed"
+          style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}
+        >
           {displayContent}
         </div>
 
