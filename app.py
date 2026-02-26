@@ -643,15 +643,29 @@ def preview_text(file_id: str, pages: int = 3, max_chars: int = 4000) -> Dict[st
     if not text:
         return {"warning": "Teks tidak terbaca (kemungkinan PDF scan). Perlu OCR untuk preview.", "text": ""}
 
-    # Clean up text: remove excessive spaces and fix formatting
-    # Replace multiple spaces with single space
+    # Aggressive text cleaning for PDF output
+    # 1. Fix hyphenated words at line breaks
+    text = re.sub(r'(\w)-\n(\w)', r'\1\2', text)
+
+    # 2. Remove excessive spaces (2+ spaces become 1)
+    text = re.sub(r' {2,}', ' ', text)
+
+    # 3. Fix newlines - single newlines become spaces, double newlines become paragraph breaks
+    text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)  # Single newline -> space
+    text = re.sub(r'\n {2,}', '\n', text)       # Remove leading spaces after newline
+    text = re.sub(r' {2,}\n', '\n', text)       # Remove trailing spaces before newline
+
+    # 4. Fix multiple spaces that might have been created
     text = re.sub(r' +', ' ', text)
-    # Replace multiple newlines with double newline (paragraph separator)
+
+    # 5. Fix paragraph breaks (3+ newlines -> 2 newlines)
     text = re.sub(r'\n{3,}', '\n\n', text)
-    # Remove spaces around newlines
-    text = re.sub(r' ?\n ?', '\n', text)
-    # Fix broken words from PDF column layout (optional)
-    # text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
+
+    # 6. Clean up URLs at the end (put each URL on new line)
+    text = re.sub(r'(https?://\S+)', r'\n\1', text)
+
+    # 7. Final cleanup - trim whitespace
+    text = text.strip()
 
     return {"text": text[:max_chars]}
 
